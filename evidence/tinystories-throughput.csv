@@ -1,0 +1,5 @@
+variant,build_commit,build_number,cpu_info,n_threads,n_gpu_layers,model_n_params,n_prompt,n_gen,avg_ns,stddev_ns,avg_ts,stddev_ts
+baseline,ca123ba76,12810,"Accelerate, Apple M3 Pro",6,0,24407712,128,0,3503616,755271,37760.602692,7211.121116
+baseline,ca123ba76,12810,"Accelerate, Apple M3 Pro",6,0,24407712,0,128,100641708,9386924,1280.041631,110.152108
+quantized,ca123ba76,12810,"Accelerate, Apple M3 Pro",6,0,24407712,128,0,5421199,623531,23831.180099,2394.514237
+quantized,ca123ba76,12810,"Accelerate, Apple M3 Pro",6,0,24407712,0,128,27473466,3076600,4701.334543,472.863903

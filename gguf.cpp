@@ -1,12 +1,16 @@
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <spawn.h>
@@ -14,10 +18,12 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <openssl/evp.h>
 #ifdef QUANT_HAS_NVML
 #include <nvml.h>
 #endif
@@ -28,6 +34,54 @@ namespace {
 
 namespace fs = std::filesystem;
 using Bytes = unsigned long long;
+
+struct Fingerprint {
+    Bytes bytes;
+    std::string sha256;
+};
+
+Fingerprint fingerprint(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("cannot read " + path.string());
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> hash(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!hash || EVP_DigestInit_ex(hash.get(), EVP_sha256(), nullptr) != 1) {
+        throw std::runtime_error("cannot initialize SHA-256");
+    }
+    std::vector<char> buffer(1024 * 1024);
+    Bytes bytes = 0;
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto size = static_cast<std::size_t>(input.gcount());
+        bytes += size;
+        if (size != 0 && EVP_DigestUpdate(hash.get(), buffer.data(), size) != 1) {
+            throw std::runtime_error("cannot hash " + path.string());
+        }
+    }
+    if (input.bad() || !input.eof()) throw std::runtime_error("cannot read " + path.string());
+    std::array<unsigned char, 32> digest{};
+    unsigned int length = 0;
+    if (EVP_DigestFinal_ex(hash.get(), digest.data(), &length) != 1 || length != digest.size()) {
+        throw std::runtime_error("cannot finalize SHA-256");
+    }
+    constexpr std::string_view hex = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(2 * digest.size());
+    for (auto value : digest) {
+        encoded.push_back(hex[value >> 4]);
+        encoded.push_back(hex[value & 15]);
+    }
+    return {bytes, std::move(encoded)};
+}
+
+void manifest_row(std::ostream& manifest, std::string_view role, const fs::path& file,
+                  const Fingerprint& identity) {
+    manifest << role << ",\"";
+    for (const char c : file.filename().string()) {
+        if (c == '"') manifest << '"';
+        manifest << c;
+    }
+    manifest << "\"," << identity.bytes << ',' << identity.sha256 << '\n';
+}
 
 #ifdef QUANT_HAS_NVML
 class GpuMemory {
@@ -124,13 +178,28 @@ std::optional<Bytes> run(std::vector<std::string> args, const fs::path& output,
     return peak;
 }
 
-std::optional<double> perplexity(const fs::path& filename) {
-    const std::regex pattern(R"(Final estimate: PPL = ([0-9.]+))");
+struct Perplexity {
+    double value;
+    std::optional<double> reported_error;
+};
+
+std::optional<Perplexity> perplexity(const fs::path& filename) {
+    const std::string number = R"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)";
+    const std::regex pattern("Final estimate: PPL =\\s*(" + number + ")(?:\\s*\\+/-\\s*(" + number + "))?\\s*$");
     std::ifstream input(filename);
     std::string line;
     std::smatch match;
     while (std::getline(input, line)) {
-        if (std::regex_search(line, match, pattern)) return std::stod(match[1].str());
+        if (!std::regex_search(line, match, pattern)) continue;
+        const double value = std::stod(match[1].str());
+        if (!std::isfinite(value) || value <= 0) continue;
+        std::optional<double> error;
+        if (match[2].matched) {
+            const double parsed = std::stod(match[2].str());
+            if (!std::isfinite(parsed) || parsed < 0) continue;
+            error = parsed;
+        }
+        return Perplexity{value, error};
     }
     return {};
 }
@@ -144,11 +213,20 @@ int parse_nonnegative(std::string_view text) {
     return value;
 }
 
+double parse_budget(const char* text) {
+    char* end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end != '\0' || !std::isfinite(value) || value < 0) {
+        throw std::invalid_argument("PPL increase budget must be finite and nonnegative");
+    }
+    return value;
+}
+
 } // namespace
 
 int run_gguf(int argc, char** argv) {
-    if (argc < 7 || argc > 10) {
-        throw std::invalid_argument("usage: quant_calibrate gguf BIN_DIR MODEL CALIBRATION EVALUATION NEW_OUTPUT_DIR [Q4_K_M|MXFP4_MOE] [GPU_LAYERS] [CONTEXT]");
+    if (argc < 7 || argc > 11) {
+        throw std::invalid_argument("usage: quant_calibrate gguf BIN_DIR MODEL CALIBRATION EVALUATION NEW_OUTPUT_DIR [Q4_K_M|MXFP4_MOE] [GPU_LAYERS] [CONTEXT] [MAX_PPL_INCREASE_PCT]");
     }
     const auto bin = fs::absolute(argv[2]);
     const auto model = fs::absolute(argv[3]);
@@ -158,41 +236,83 @@ int run_gguf(int argc, char** argv) {
     const std::string format = argc >= 8 ? argv[7] : "Q4_K_M";
     const int layers = argc >= 9 ? parse_nonnegative(argv[8]) : 0;
     const int context = argc >= 10 ? parse_nonnegative(argv[9]) : 512;
+    const std::optional<double> budget = argc == 11 ? std::optional{parse_budget(argv[10])} : std::nullopt;
     const auto layer_arg = std::to_string(layers);
     const auto context_arg = std::to_string(context);
+    const auto ubatch_arg = std::to_string(std::min(context, 512));
+    const auto prefill_arg = std::to_string(std::min(context, 512));
+    const auto decode_arg = std::to_string(std::min(context, 128));
     if (format != "Q4_K_M" && format != "MXFP4_MOE") throw std::invalid_argument("unsupported GGUF type");
     if (context < 32) throw std::invalid_argument("minimum context is 32");
+    if (std::regex_search(model.filename().string(), std::regex(R"(-[0-9]{5}-of-[0-9]{5}\.gguf$)"))) {
+        throw std::invalid_argument("the manifest requires a single-file GGUF checkpoint");
+    }
     for (const auto& file : {model, calibration, evaluation}) {
         if (!fs::is_regular_file(file)) throw std::invalid_argument("input is not a regular file: " + file.string());
     }
-    if (fs::equivalent(calibration, evaluation)) throw std::invalid_argument("use distinct calibration and evaluation files");
-    for (const auto* name : {"llama-imatrix", "llama-quantize", "llama-perplexity", "llama-bench"}) {
+    const auto calibration_id = fingerprint(calibration);
+    const auto evaluation_id = fingerprint(evaluation);
+    if (calibration_id.bytes == 0 || evaluation_id.bytes == 0) {
+        throw std::invalid_argument("calibration and evaluation texts must be nonempty");
+    }
+    if (calibration_id.sha256 == evaluation_id.sha256) {
+        throw std::invalid_argument("calibration and evaluation contents have the same SHA-256");
+    }
+    const auto model_id = fingerprint(model);
+    constexpr std::array tools{"llama-imatrix", "llama-quantize", "llama-perplexity", "llama-bench"};
+    for (const auto* name : tools) {
         if (access((bin / name).c_str(), X_OK) != 0) throw std::runtime_error("missing executable: " + (bin / name).string());
     }
     if (!fs::create_directory(out)) throw std::invalid_argument("output directory already exists");
 
+    std::ofstream manifest(out / "manifest.csv");
+    manifest.exceptions(std::ios::badbit | std::ios::failbit);
+    manifest << "role,filename,bytes,sha256\n";
+    manifest_row(manifest, "baseline", model, model_id);
+    manifest_row(manifest, "calibration", calibration, calibration_id);
+    manifest_row(manifest, "evaluation", evaluation, evaluation_id);
+    for (const auto* name : tools) {
+        const auto executable = bin / name;
+        manifest_row(manifest, "tool", executable, fingerprint(executable));
+    }
+    manifest.flush();
+
+    std::ofstream commands(out / "commands.txt");
+    commands.exceptions(std::ios::badbit | std::ios::failbit);
+    const auto execute = [&](std::vector<std::string> args, const fs::path& stdout_path,
+                             const fs::path& stderr_path, bool memory = false) {
+        for (const auto& arg : args) commands << std::quoted(arg) << ' ';
+        commands << '\n' << std::flush;
+        return run(std::move(args), stdout_path, stderr_path, memory);
+    };
+
     const auto matrix = out / "imatrix.gguf";
     const auto packed = out / "quantized.gguf";
-    run({(bin / "llama-imatrix").string(), "-m", model.string(), "-f", calibration.string(),
-         "-o", matrix.string(), "-ngl", layer_arg, "-c", context_arg},
+    execute({(bin / "llama-imatrix").string(), "-m", model.string(), "-f", calibration.string(),
+         "-o", matrix.string(), "-ngl", layer_arg, "-c", context_arg, "-b", context_arg, "-ub", ubatch_arg},
         out / "calibration.stdout", out / "calibration.stderr");
-    run({(bin / "llama-quantize").string(), "--imatrix", matrix.string(), model.string(),
+    execute({(bin / "llama-quantize").string(), "--imatrix", matrix.string(), model.string(),
          packed.string(), format}, out / "quantize.stdout", out / "quantize.stderr");
 
+    const auto packed_id = fingerprint(packed);
+    manifest_row(manifest, "importance_matrix", matrix, fingerprint(matrix));
+    manifest_row(manifest, "quantized", packed, packed_id);
+    manifest.close();
+
     struct Measurement {
-        double ppl;
+        Perplexity ppl;
         std::optional<Bytes> peak;
     };
     const auto measure = [&](const fs::path& checkpoint, std::string label) {
         auto stdout_path = out / (label + ".ppl.stdout");
         auto stderr_path = out / (label + ".ppl.stderr");
-        run({(bin / "llama-perplexity").string(), "-m", checkpoint.string(), "-f", evaluation.string(),
-             "-c", context_arg, "-ngl", layer_arg}, stdout_path, stderr_path);
+        execute({(bin / "llama-perplexity").string(), "-m", checkpoint.string(), "-f", evaluation.string(),
+             "-c", context_arg, "-b", context_arg, "-ub", ubatch_arg, "-ngl", layer_arg}, stdout_path, stderr_path);
         auto ppl = perplexity(stdout_path);
         if (!ppl) ppl = perplexity(stderr_path);
-        if (!ppl || *ppl <= 0.0) throw std::runtime_error("missing final perplexity in " + label + " logs");
-        auto peak = run({(bin / "llama-bench").string(), "-m", checkpoint.string(), "-ngl", layer_arg,
-                         "-p", "512", "-n", "128", "-r", "5", "-o", "csv"},
+        if (!ppl) throw std::runtime_error("missing final perplexity in " + label + " logs");
+        auto peak = execute({(bin / "llama-bench").string(), "-m", checkpoint.string(), "-ngl", layer_arg,
+                         "-p", prefill_arg, "-n", decode_arg, "-r", "5", "-o", "csv"},
                         out / (label + ".bench.csv"), out / (label + ".bench.stderr"), layers > 0);
         return Measurement{*ppl, peak};
     };
@@ -201,17 +321,32 @@ int run_gguf(int argc, char** argv) {
     const auto low = measure(packed, "quantized");
     std::ofstream csv(out / "summary.csv");
     csv.exceptions(std::ios::badbit | std::ios::failbit);
-    csv << "checkpoint,gguf_bytes,perplexity,delta_ppl,delta_ppl_pct,sampled_peak_vram_bytes\n";
-    const auto write_row = [&](std::string_view label, const fs::path& checkpoint, const Measurement& value) {
-        csv << label << ',' << fs::file_size(checkpoint) << ',' << std::setprecision(12)
-            << value.ppl << ',' << value.ppl - base.ppl << ','
-            << 100.0 * (value.ppl / base.ppl - 1.0) << ',';
+    csv << "checkpoint,gguf_bytes,perplexity,llama_ppl_reported_error,delta_ppl,delta_ppl_pct,"
+           "delta_nll_nats_per_token,sampled_peak_vram_bytes\n";
+    const auto write_row = [&](std::string_view label, const Fingerprint& checkpoint, const Measurement& value) {
+        const double ratio = value.ppl.value / base.ppl.value;
+        csv << label << ',' << checkpoint.bytes << ',' << std::setprecision(9) << value.ppl.value << ',';
+        if (value.ppl.reported_error) csv << *value.ppl.reported_error;
+        csv << ',' << value.ppl.value - base.ppl.value << ',' << 100.0 * (ratio - 1.0)
+            << ',' << std::log(ratio) << ',';
         if (value.peak) csv << *value.peak;
         csv << '\n';
     };
-    write_row("baseline", model, base);
-    write_row(format, packed, low);
+    write_row("baseline", model_id, base);
+    write_row(format, packed_id, low);
     csv.close();
     std::cout << out / "summary.csv" << '\n';
+    const double increase = 100.0 * (low.ppl.value / base.ppl.value - 1.0);
+    if (budget) {
+        std::ofstream gate(out / "quality-gate.csv");
+        gate.exceptions(std::ios::badbit | std::ios::failbit);
+        gate << "max_ppl_increase_pct,observed_ppl_increase_pct,status\n";
+        gate << std::setprecision(9) << *budget << ',' << increase << ',' << (increase > *budget ? "fail" : "pass") << '\n';
+        gate.close();
+        if (increase > *budget) {
+            std::cerr << "perplexity increase " << increase << "% exceeds " << *budget << "% budget\n";
+            return 3;
+        }
+    }
     return 0;
 }
