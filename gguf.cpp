@@ -212,6 +212,85 @@ std::optional<Perplexity> perplexity(const fs::path& filename) {
     return {};
 }
 
+std::vector<std::string> benchmark_csv_row(std::istream& input) {
+    std::vector<std::string> row;
+    while (true) {
+        auto& field = row.emplace_back();
+        if (input.peek() == '"') {
+            input.get();
+            while (true) {
+                const int c = input.get();
+                if (c == std::char_traits<char>::eof()) return {};
+                if (c == '"') {
+                    if (input.peek() != '"') break;
+                    input.get();
+                }
+                field += static_cast<char>(c);
+            }
+        } else {
+            for (int c = input.peek(); c != std::char_traits<char>::eof(); c = input.peek()) {
+                if (c == ',' || c == '\n' || c == '\r') break;
+                if (c == '"') return {};
+                field += static_cast<char>(input.get());
+            }
+        }
+
+        const int end = input.get();
+        if (end == '\n' || end == std::char_traits<char>::eof()) return row;
+        if (end == '\r' && input.get() == '\n') return row;
+        if (end != ',') return {};
+    }
+}
+
+bool benchmark_duration(std::string_view text, Bytes minimum) {
+    Bytes value = 0;
+    const auto end = text.data() + text.size();
+    const auto parsed = std::from_chars(text.data(), end, value);
+    return parsed.ec == std::errc{} && parsed.ptr == end && value >= minimum;
+}
+
+bool benchmark_throughput(const std::string& text, bool positive) {
+    char* end = nullptr;
+    const double value = std::strtod(text.c_str(), &end);
+    return end != text.c_str() && end == text.c_str() + text.size() && std::isfinite(value)
+        && (positive ? value > 0 : value >= 0);
+}
+
+bool valid_benchmark_csv(const fs::path& path, std::string_view prefill, std::string_view decode) {
+    std::ifstream input(path);
+    if (!input) return false;
+    const auto header = benchmark_csv_row(input);
+    constexpr std::array required{"n_prompt", "n_gen", "avg_ns", "stddev_ns", "avg_ts", "stddev_ts"};
+    std::array<std::size_t, required.size()> columns{};
+    for (std::size_t i = 0; i < required.size(); ++i) {
+        const auto column = std::find(header.begin(), header.end(), required[i]);
+        if (column == header.end() || std::find(column + 1, header.end(), required[i]) != header.end()) {
+            return false;
+        }
+        columns[i] = static_cast<std::size_t>(column - header.begin());
+    }
+    const auto [n_prompt, n_gen, avg_ns, stddev_ns, avg_ts, stddev_ts] = columns;
+
+    bool saw_prefill = false;
+    bool saw_decode = false;
+    while (input.peek() != std::char_traits<char>::eof()) {
+        const auto row = benchmark_csv_row(input);
+        if (row.size() != header.size() || !benchmark_duration(row[avg_ns], 1)
+            || !benchmark_duration(row[stddev_ns], 0) || !benchmark_throughput(row[avg_ts], true)
+            || !benchmark_throughput(row[stddev_ts], false)) {
+            return false;
+        }
+        if (!saw_prefill && row[n_prompt] == prefill && row[n_gen] == "0") {
+            saw_prefill = true;
+        } else if (!saw_decode && row[n_prompt] == "0" && row[n_gen] == decode) {
+            saw_decode = true;
+        } else {
+            return false;
+        }
+    }
+    return !input.bad() && saw_prefill && saw_decode;
+}
+
 int parse_nonnegative(std::string_view text) {
     int value = 0;
     const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
@@ -324,9 +403,13 @@ int run_gguf(int argc, char** argv) {
         auto ppl = perplexity(stdout_path);
         if (!ppl) ppl = perplexity(stderr_path);
         if (!ppl) throw std::runtime_error("missing final perplexity in " + label + " logs");
+        const auto bench_path = out / (label + ".bench.csv");
         auto peak = execute({(bin / "llama-bench").string(), "-m", checkpoint.string(), "-ngl", layer_arg,
                          "-p", prefill_arg, "-n", decode_arg, "-r", "5", "-o", "csv"},
-                        out / (label + ".bench.csv"), out / (label + ".bench.stderr"), layers > 0);
+                        bench_path, out / (label + ".bench.stderr"), layers > 0);
+        if (!valid_benchmark_csv(bench_path, prefill_arg, decode_arg)) {
+            throw std::runtime_error("invalid llama-bench CSV for " + label + ": " + bench_path.string());
+        }
         return Measurement{*ppl, peak};
     };
 

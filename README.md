@@ -31,7 +31,7 @@ Calibration and evaluation run with the requested context as the logical batch s
 - `manifest.csv` records file sizes and SHA-256 hashes for the checkpoint, corpora, tool executables, importance matrix, and output checkpoint.
 - `commands.txt` and phase logs capture tool invocations and output.
 - `summary.csv` reports held-out perplexity, any error estimate printed by llama.cpp, percentage change, and the difference in negative log likelihood in nats per token.
-- `*.bench.csv` preserves llama.cpp throughput and timing. For NVIDIA memory samples, build with `-DQUANT_ENABLE_NVML=ON` and use a nonzero GPU layer count. The 50 ms sampling interval gives a lower bound on the peak.
+- `*.bench.csv` preserves llama.cpp's aggregate throughput and timing. The runner checks that each checkpoint produced one prefill row and one decode row at the requested token counts, with positive means and nonnegative standard deviations. Invalid CSV leaves the phase logs and stops the run before the summary or quality decision. For NVIDIA memory samples, build with `-DQUANT_ENABLE_NVML=ON` and use a nonzero GPU layer count. The 50 ms sampling interval gives a lower bound on the peak.
 
 The runner hashes the inputs before the tools start and the generated files as soon as their producing phase finishes. It rechecks those fingerprints after the measurements and before writing the summary or quality decision. If a file's content changes, the run fails and preserves the phase logs. Keep the inputs stationary during a run. The two checks detect persistent content changes and add a second read of each checkpoint outside the measured phases.
 
