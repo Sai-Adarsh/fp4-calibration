@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.24)
+project(fp4_calibration LANGUAGES CXX)
+
+option(QUANT_ENABLE_NVML "Sample NVIDIA device memory of llama-bench" OFF)
+add_executable(quant_calibrate main.cpp gguf.cpp)
+target_compile_features(quant_calibrate PRIVATE cxx_std_20)
+if(QUANT_ENABLE_NVML)
+  find_path(NVML_INCLUDE_DIR nvml.h REQUIRED)
+  find_library(NVML_LIBRARY nvidia-ml REQUIRED)
+  target_include_directories(quant_calibrate PRIVATE ${NVML_INCLUDE_DIR})
+  target_link_libraries(quant_calibrate PRIVATE ${NVML_LIBRARY})
+  target_compile_definitions(quant_calibrate PRIVATE QUANT_HAS_NVML)
+endif()
