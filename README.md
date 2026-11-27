@@ -47,3 +47,29 @@ On this run Q4_K_M shrank the file by 4.69×, raised measured perplexity by 0.78
 To reproduce the input texts, take 16,000 bytes starting at offset 4,096 from [Alice's Adventures in Wonderland](https://github.com/GITenberg/Alice-s-Adventures-in-Wonderland_11/blob/7f18748e114b994d5d9454d5793581bc0b9cf9d7/11.txt) for calibration and [Pride and Prejudice](https://github.com/GITenberg/Pride-and-Prejudice_1342/blob/81db45c9c48c592f0b77f01fc59e677ad0a5634e/1342.txt) for evaluation. Run with `Q4_K_M 0 128 25` and use the [manifest](evidence/tinystories-manifest.csv) to match input hashes. See the [quality](evidence/tinystories-quality.csv) and [throughput](evidence/tinystories-throughput.csv) measurements. This experiment covers one small checkpoint and a narrow evaluation corpus.
 
 [llama.cpp importance matrix](https://github.com/ggml-org/llama.cpp/blob/master/tools/imatrix/README.md) · [Quantizer](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md) · [Perplexity](https://github.com/ggml-org/llama.cpp/blob/master/tools/perplexity/README.md) · [Benchmarking](https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md)
+
+## Tests and coverage
+
+```sh
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+The suite drives the public CLI for both the byte model and a temporary GGUF pipeline. Local test binaries stand in for the four llama.cpp tools. The tests check that separate inputs reach calibration and evaluation, verify recorded hashes against CMake's SHA-256, and assert the quality gate and error paths. They require neither a checkpoint download nor a GPU.
+
+For line and branch coverage on macOS with Xcode:
+
+```sh
+cov_dir=$(mktemp -d)
+mkdir "$cov_dir/raw"
+cmake -S . -B "$cov_dir/build" -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fprofile-instr-generate"
+cmake --build "$cov_dir/build"
+LLVM_PROFILE_FILE="$cov_dir/raw/%m-%p.profraw" ctest --test-dir "$cov_dir/build" --output-on-failure
+xcrun llvm-profdata merge -sparse "$cov_dir"/raw/*.profraw -o "$cov_dir/merged.profdata"
+xcrun llvm-cov report "$cov_dir/build/quant_calibrate" -instr-profile "$cov_dir/merged.profdata"
+```
+
+The Apple Silicon build covered 399 of 407 compiled production lines (98.03%) and 171 of 204 branches (83.82%). The uncovered lines handle failures from OpenSSL and `waitpid`. The optional NVML code requires a separate NVIDIA build and measurement.
