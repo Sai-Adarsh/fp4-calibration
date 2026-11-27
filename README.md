@@ -33,6 +33,8 @@ Calibration and evaluation run with the requested context as the logical batch s
 - `summary.csv` reports held-out perplexity, any error estimate printed by llama.cpp, percentage change, and the difference in negative log likelihood in nats per token.
 - `*.bench.csv` preserves llama.cpp throughput and timing. For NVIDIA memory samples, build with `-DQUANT_ENABLE_NVML=ON` and use a nonzero GPU layer count. The 50 ms sampling interval gives a lower bound on the peak.
 
+The runner hashes the inputs before the tools start and the generated files as soon as their producing phase finishes. It rechecks those fingerprints after the measurements and before writing the summary or quality decision. If a file's content changes, the run fails and preserves the phase logs. Keep the inputs stationary during a run. The two checks detect persistent content changes and add a second read of each checkpoint outside the measured phases.
+
 ## Measured TinyStories run
 
 An Apple M3 Pro ran llama.cpp `b12810` / `ca123ba76` with zero model layers offloaded. The [TinyStories checkpoint](https://huggingface.co/ggml-org/models-moved/blob/main/tinyllamas/stories15M.gguf) contained 24,407,712 parameters according to llama.cpp. Calibration used 36 chunks and evaluation used 35 chunks, both with 128 tokens per context and one sequence per batch.
@@ -56,7 +58,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The suite drives the public CLI for both the byte model and a temporary GGUF pipeline. Local test binaries stand in for the four llama.cpp tools. The tests check that separate inputs reach calibration and evaluation, verify recorded hashes against CMake's SHA-256, and assert the quality gate and error paths. They require neither a checkpoint download nor a GPU.
+The suite drives the public CLI for both the byte model and a temporary GGUF pipeline. Local test binaries stand in for the four llama.cpp tools. The tests check that separate inputs reach calibration and evaluation, compare recorded hashes with CMake's SHA-256, and check the quality gate. A fixture that changes the corpus or packed checkpoint during the run must leave the phase logs without producing a summary. The tests require neither a checkpoint download nor a GPU.
 
 For line and branch coverage on macOS with Xcode:
 
@@ -72,4 +74,4 @@ xcrun llvm-profdata merge -sparse "$cov_dir"/raw/*.profraw -o "$cov_dir/merged.p
 xcrun llvm-cov report "$cov_dir/build/quant_calibrate" -instr-profile "$cov_dir/merged.profdata"
 ```
 
-The Apple Silicon build covered 399 of 407 compiled production lines (98.03%) and 171 of 204 branches (83.82%). The uncovered lines handle failures from OpenSSL and `waitpid`. The optional NVML code requires a separate NVIDIA build and measurement.
+The Apple Silicon build covered 415 of 423 compiled production lines (98.11%) and 175 of 208 branches (84.13%). The uncovered lines handle failures from OpenSSL and `waitpid`. The optional NVML code requires a separate NVIDIA build and measurement.

@@ -38,6 +38,14 @@ using Bytes = unsigned long long;
 struct Fingerprint {
     Bytes bytes;
     std::string sha256;
+
+    bool operator==(const Fingerprint&) const = default;
+};
+
+struct Artifact {
+    std::string_view role;
+    fs::path path;
+    Fingerprint identity;
 };
 
 Fingerprint fingerprint(const fs::path& path) {
@@ -265,15 +273,20 @@ int run_gguf(int argc, char** argv) {
     }
     if (!fs::create_directory(out)) throw std::invalid_argument("output directory already exists");
 
+    std::vector<Artifact> artifacts;
     std::ofstream manifest(out / "manifest.csv");
     manifest.exceptions(std::ios::badbit | std::ios::failbit);
     manifest << "role,filename,bytes,sha256\n";
-    manifest_row(manifest, "baseline", model, model_id);
-    manifest_row(manifest, "calibration", calibration, calibration_id);
-    manifest_row(manifest, "evaluation", evaluation, evaluation_id);
+    const auto record = [&](std::string_view role, const fs::path& path, const Fingerprint& identity) {
+        manifest_row(manifest, role, path, identity);
+        artifacts.push_back({role, path, identity});
+    };
+    record("baseline", model, model_id);
+    record("calibration", calibration, calibration_id);
+    record("evaluation", evaluation, evaluation_id);
     for (const auto* name : tools) {
         const auto executable = bin / name;
-        manifest_row(manifest, "tool", executable, fingerprint(executable));
+        record("tool", executable, fingerprint(executable));
     }
     manifest.flush();
 
@@ -291,12 +304,12 @@ int run_gguf(int argc, char** argv) {
     execute({(bin / "llama-imatrix").string(), "-m", model.string(), "-f", calibration.string(),
          "-o", matrix.string(), "-ngl", layer_arg, "-c", context_arg, "-b", context_arg, "-ub", ubatch_arg},
         out / "calibration.stdout", out / "calibration.stderr");
+    record("importance_matrix", matrix, fingerprint(matrix));
     execute({(bin / "llama-quantize").string(), "--imatrix", matrix.string(), model.string(),
          packed.string(), format}, out / "quantize.stdout", out / "quantize.stderr");
 
     const auto packed_id = fingerprint(packed);
-    manifest_row(manifest, "importance_matrix", matrix, fingerprint(matrix));
-    manifest_row(manifest, "quantized", packed, packed_id);
+    record("quantized", packed, packed_id);
     manifest.close();
 
     struct Measurement {
@@ -319,6 +332,12 @@ int run_gguf(int argc, char** argv) {
 
     const auto base = measure(model, "baseline");
     const auto low = measure(packed, "quantized");
+    for (const auto& artifact : artifacts) {
+        if (!fs::is_regular_file(artifact.path) || fingerprint(artifact.path) != artifact.identity) {
+            throw std::runtime_error("artifact changed during run: " + std::string(artifact.role) +
+                                     " (" + artifact.path.string() + ")");
+        }
+    }
     std::ofstream csv(out / "summary.csv");
     csv.exceptions(std::ios::badbit | std::ios::failbit);
     csv << "checkpoint,gguf_bytes,perplexity,llama_ppl_reported_error,delta_ppl,delta_ppl_pct,"
