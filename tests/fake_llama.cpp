@@ -60,7 +60,21 @@ int main(int argc, char** argv) {
         if (getenv("QUANT_TEST_MODE") == "remove_quantized" && model.filename() == "quantized.gguf") {
             if (!std::filesystem::remove(model)) return 9;
         }
-        std::cout << "n_prompt,n_gen,avg_ts\n128,0,1000\n0,128,50\n";
+        const auto mode = getenv("QUANT_TEST_MODE");
+        const bool bad_benchmark = model.filename() == "quantized.gguf";
+        if (bad_benchmark && mode == "empty_benchmark") return 0;
+        std::cout << "n_prompt,model_filename,n_gen,avg_ns,stddev_ns,avg_ts,stddev_ts\n"
+                     "\"128\",\"models/model, FP16.gguf\",\"0\",\"128000000\",\"0\",\"1000\",\"0\"\n";
+        if (bad_benchmark && mode == "missing_decode") return 0;
+        if (bad_benchmark && mode == "wrong_decode") {
+            std::cout << "0,model.gguf,64,2560000000,0,50,0\n";
+        } else if (bad_benchmark && mode == "invalid_throughput") {
+            std::cout << "0,model.gguf,128,2560000000,0,NaN,0\n";
+        } else if (bad_benchmark && mode == "short_benchmark_row") {
+            std::cout << "0,model.gguf,128,2560000000,0,50\n";
+        } else {
+            std::cout << "0,model.gguf,128,2560000000,0,50,0\n";
+        }
         return 0;
     }
     return 9;
