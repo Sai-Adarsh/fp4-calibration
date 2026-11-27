@@ -74,6 +74,11 @@ match_file("${WORK}/passed/quality-gate.csv" "10,5,pass")
 match_file("${WORK}/passed/commands.txt" "model with spaces.gguf")
 match_file("${WORK}/passed/quantized.bench.csv" "0,128,50")
 
+expect_cli(0 "/summary.csv" ${GGUF} "${WORK}/at-budget" Q4_K_M 0 128 5)
+match_file("${WORK}/at-budget/quality-gate.csv" "5,5,pass")
+expect_cli(3 "exceeds" ${GGUF} "${WORK}/over-budget" Q4_K_M 0 128 4.999999)
+match_file("${WORK}/over-budget/quality-gate.csv" "4[.]999999,5,fail")
+
 expect_cli(3 "perplexity increase 5% exceeds 1% budget" ${GGUF} "${WORK}/failed" MXFP4_MOE 0 128 1)
 match_file("${WORK}/failed/summary.csv" "MXFP4_MOE,")
 match_file("${WORK}/failed/quality-gate.csv" "1,5,fail")
