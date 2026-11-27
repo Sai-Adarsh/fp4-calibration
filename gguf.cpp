@@ -333,7 +333,7 @@ int run_gguf(int argc, char** argv) {
     const auto base = measure(model, "baseline");
     const auto low = measure(packed, "quantized");
     for (const auto& artifact : artifacts) {
-        if (fingerprint(artifact.path) != artifact.identity) {
+        if (!fs::is_regular_file(artifact.path) || fingerprint(artifact.path) != artifact.identity) {
             throw std::runtime_error("artifact changed during run: " + std::string(artifact.role) +
                                      " (" + artifact.path.string() + ")");
         }
