@@ -61,18 +61,23 @@ int main(int argc, char** argv) {
             if (!std::filesystem::remove(model)) return 9;
         }
         const auto mode = getenv("QUANT_TEST_MODE");
-        const bool bad_benchmark = model.filename() == "quantized.gguf";
-        if (bad_benchmark && mode == "empty_benchmark") return 0;
+        const bool quantized = model.filename() == "quantized.gguf";
+        if (quantized && mode == "empty_benchmark") return 0;
         std::cout << "n_prompt,model_filename,n_gen,avg_ns,stddev_ns,avg_ts,stddev_ts\n"
-                     "\"128\",\"models/model, FP16.gguf\",\"0\",\"128000000\",\"0\",\"1000\",\"0\"\n";
-        if (bad_benchmark && mode == "missing_decode") return 0;
-        if (bad_benchmark && mode == "wrong_decode") {
+                     "\"128\",\"models/model, \"\"FP16\"\".gguf\",\"0\",\"128000000\",\"0\",\"1000\",\"0\"\r\n";
+        if (quantized && mode == "missing_decode") return 0;
+        if (quantized && mode == "wrong_decode") {
             std::cout << "0,model.gguf,64,2560000000,0,50,0\n";
-        } else if (bad_benchmark && mode == "invalid_throughput") {
+        } else if (quantized && mode == "invalid_throughput") {
             std::cout << "0,model.gguf,128,2560000000,0,NaN,0\n";
-        } else if (bad_benchmark && mode == "short_benchmark_row") {
+        } else if (quantized && mode == "invalid_duration") {
+            std::cout << "0,model.gguf,128,0,0,50,0\n";
+        } else if (quantized && mode == "short_benchmark_row") {
             std::cout << "0,model.gguf,128,2560000000,0,50\n";
         } else {
+            std::cout << "0,model.gguf,128,2560000000,0,50,0\n";
+        }
+        if (quantized && mode == "duplicate_decode") {
             std::cout << "0,model.gguf,128,2560000000,0,50,0\n";
         }
         return 0;
