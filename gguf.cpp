@@ -355,14 +355,17 @@ int run_gguf(int argc, char** argv) {
     write_row(format, packed_id, low);
     csv.close();
     std::cout << out / "summary.csv" << '\n';
-    const double increase = 100.0 * (low.ppl.value / base.ppl.value - 1.0);
     if (budget) {
+        const double increase = 100.0 * (low.ppl.value / base.ppl.value - 1.0);
+        // Round the cutoff to the precision of the measured perplexity.
+        const double max_ppl = std::fma(*budget / 100.0, base.ppl.value, base.ppl.value);
+        const bool over_budget = low.ppl.value > max_ppl;
         std::ofstream gate(out / "quality-gate.csv");
         gate.exceptions(std::ios::badbit | std::ios::failbit);
         gate << "max_ppl_increase_pct,observed_ppl_increase_pct,status\n";
-        gate << std::setprecision(9) << *budget << ',' << increase << ',' << (increase > *budget ? "fail" : "pass") << '\n';
+        gate << std::setprecision(9) << *budget << ',' << increase << ',' << (over_budget ? "fail" : "pass") << '\n';
         gate.close();
-        if (increase > *budget) {
+        if (over_budget) {
             std::cerr << "perplexity increase " << increase << "% exceeds " << *budget << "% budget\n";
             return 3;
         }
