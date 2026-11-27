@@ -25,6 +25,9 @@ int main(int argc, char** argv) {
     if (tool == "llama-imatrix") {
         const auto corpus = std::filesystem::path(flag("-f")).filename().string();
         if (corpus != "calibration.txt" || flag("-c") != flag("-b")) return 8;
+        if (getenv("QUANT_TEST_MODE") == "mutate_calibration") {
+            std::ofstream(std::filesystem::path(flag("-f")), std::ios::app) << "Added after hashing.\n";
+        }
         return write(flag("-o"), "fake importance matrix");
     }
     if (tool == "llama-quantize") {
@@ -50,6 +53,10 @@ int main(int argc, char** argv) {
     }
     if (tool == "llama-bench") {
         if (flag("-p") != "128" || flag("-n") != "128" || flag("-r") != "5") return 8;
+        const auto model = std::filesystem::path(flag("-m"));
+        if (getenv("QUANT_TEST_MODE") == "mutate_quantized" && model.filename() == "quantized.gguf") {
+            std::ofstream(model, std::ios::app) << "Changed during benchmark.\n";
+        }
         std::cout << "n_prompt,n_gen,avg_ts\n128,0,1000\n0,128,50\n";
         return 0;
     }
