@@ -57,6 +57,9 @@ int main(int argc, char** argv) {
         if (getenv("QUANT_TEST_MODE") == "mutate_quantized" && model.filename() == "quantized.gguf") {
             std::ofstream(model, std::ios::app) << "Changed during benchmark.\n";
         }
+        if (getenv("QUANT_TEST_MODE") == "remove_quantized" && model.filename() == "quantized.gguf") {
+            if (!std::filesystem::remove(model)) return 9;
+        }
         std::cout << "n_prompt,n_gen,avg_ts\n128,0,1000\n0,128,50\n";
         return 0;
     }
