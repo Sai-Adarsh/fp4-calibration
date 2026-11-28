@@ -346,6 +346,7 @@ int run_gguf(int argc, char** argv) {
         throw std::invalid_argument("calibration and evaluation contents have the same SHA-256");
     }
     const auto model_id = fingerprint(model);
+    if (model_id.bytes == 0) throw std::invalid_argument("empty GGUF artifact: baseline");
     constexpr std::array tools{"llama-imatrix", "llama-quantize", "llama-perplexity", "llama-bench"};
     for (const auto* name : tools) {
         if (access((bin / name).c_str(), X_OK) != 0) throw std::runtime_error("missing executable: " + (bin / name).string());
@@ -383,11 +384,14 @@ int run_gguf(int argc, char** argv) {
     execute({(bin / "llama-imatrix").string(), "-m", model.string(), "-f", calibration.string(),
          "-o", matrix.string(), "-ngl", layer_arg, "-c", context_arg, "-b", context_arg, "-ub", ubatch_arg},
         out / "calibration.stdout", out / "calibration.stderr");
-    record("importance_matrix", matrix, fingerprint(matrix));
+    const auto matrix_id = fingerprint(matrix);
+    if (matrix_id.bytes == 0) throw std::runtime_error("empty GGUF artifact: importance_matrix");
+    record("importance_matrix", matrix, matrix_id);
     execute({(bin / "llama-quantize").string(), "--imatrix", matrix.string(), model.string(),
          packed.string(), format}, out / "quantize.stdout", out / "quantize.stderr");
 
     const auto packed_id = fingerprint(packed);
+    if (packed_id.bytes == 0) throw std::runtime_error("empty GGUF artifact: quantized");
     record("quantized", packed, packed_id);
     manifest.close();
 
