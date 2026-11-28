@@ -28,12 +28,12 @@ int main(int argc, char** argv) {
         if (getenv("QUANT_TEST_MODE") == "mutate_calibration") {
             std::ofstream(std::filesystem::path(flag("-f")), std::ios::app) << "Added after hashing.\n";
         }
-        return write(flag("-o"), "fake importance matrix");
+        return write(flag("-o"), getenv("QUANT_TEST_MODE") == "empty_importance_matrix" ? "" : "fake importance matrix");
     }
     if (tool == "llama-quantize") {
         if (argc != 6 || std::string_view(argv[1]) != "--imatrix"
             || !std::filesystem::exists(argv[2])) return 8;
-        return write(argv[4], "GGUF fake Q4 payload");
+        return write(argv[4], getenv("QUANT_TEST_MODE") == "empty_quantized" ? "" : "GGUF fake Q4 payload");
     }
     if (tool == "llama-perplexity") {
         if (getenv("QUANT_TEST_MODE") == "crash") {
